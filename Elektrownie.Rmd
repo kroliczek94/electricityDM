@@ -1,0 +1,178 @@
+---
+title: "Analiza elektrowni"
+author: "£ukasz Królik"
+date: "04.12.2017"
+output: html_document# table of content true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+##Wstêp
+W obecnych czasach tocz¹ siê starania o to, by œrodowisko uczyniæ czystszym oraz naturalniejszym. Energia odnawialna jest jednym z czo³owych czynników tej walki. Elektrownie s³oneczne (fotowoltaniczne) s¹ jednymi z najm³odszych przedstawicieli tej ga³êzi energetyki, jednoczeœnie rozwijaj¹c siê niezwykle dynamicznie. W celu zoptymalizowania procesu produkcji pr¹du niezbêdna jest wiedza na temat tego, ile energii zostanie wyprodukowane przez panele solarne, tak aby móc odpowiednio gospodarowaæ energi¹ w celu unikniêcia strat. Poni¿szy raport ma na celu znalezenie najwa¿niejszych czynników wp³ywaj¹cych na iloœæ wyprodukowanej energii a tak¿e przetestowaæ popularne algorytmy próbuj¹ce dokonaæ predykcji tej¿e energii.
+
+```{r loadLibraries, warning=FALSE, message=FALSE, error=FALSE}
+##Kod wyliczaj¹cy wykorzystane biblioteki.
+
+setwd("D:/elektrownie db")
+library("ggplot2")
+library(dplyr)
+library(zoo)
+library(reshape2)
+library(tidyr)
+library(gridExtra)
+library(stargazer)
+library(ggfortify)
+library(gapminder)
+library(gganimate)
+library(GGally)
+library(ggcorrplot)
+library(kernlab)
+```
+```{r setSeed}
+#Kod zapewniaj¹cy powtarzalnoœæ wyników przy ka¿dym uruchomieniu raportu na tych samych danych.
+
+set.seed(23)
+```
+```{r loadFromFile, cache=TRUE, warning=FALSE, message=FALSE, error=FALSE} 
+##Kod pozwalaj¹cy wczytaæ dane z pliku.
+
+initial <- read.csv("elektrownie.csv", nrows = 1000)
+classes <- sapply(initial, class)
+tabAll <- read.csv("elektrownie.csv",
+                     colClasses = classes)
+
+
+
+```
+##Kod przetwarzaj¹cy brakuj¹ce dane.
+Zbiór nie zawiera wartoœci pustych (NA), co mo¿na sprawdziæ za pomoc¹ polecenia tabAll[rowSums(is.na(tabAll)) > 0,]. Niestety w toku przeszukiwania zbioru danych, uda³o siê znaleŸæ dane, które jednoznacznie wskazywa³y na to, ¿e nie wszystkie dane s¹ rzetelne.
+
+```{r findmissingValueIssues, cache = TRUE}
+ggplot(data = tabAll[tabAll$idsito == 0.1, ], aes(x= data, y= kwh)) + geom_point()
+```
+Doœæ interesuj¹ce okaza³y siê linie proste znaduj¹ce siê po prawej stronie wykresu. Jak siê okaza³o s¹ one od pewnego momentu wysy³ane tylko raz dziennie z tak¹ sam¹ wartoœci¹. Przeszukuj¹c zbiór takich danych okaza³o siê, ¿e wszystkie dane maj¹ takie same wartoœci wszystkich atrybutów (oprócz atrybutu 'data' oraz 'id').
+`r knitr::kable(tabAll[tabAll$idsito == 0.1, ][13000:13010,1:6]) `
+
+Stan taki jest zdecydowanie niepoprawny, dlatego te¿ zosta³y usuniête wszystkie dane, które w ci¹gu dnia mia³y inn¹ liczbê obserwacji ni¿ 19. 
+
+##Sekcjê podsumowuj¹c¹ rozmiar zbioru i podstawowe statystyki.
+```{r showBasicStats, results='asis'}
+stargazer(tabAll, type = "html")
+
+```
+
+##Szczegó³ow¹ analizê wartoœci atrybutów (np. poprzez prezentacjê rozk³adów wartoœci).
+Otrzymana ramka danych sk³ada siê z `r nrow(tabAll)` obserwacji i `r ncol(tabAll)` atrybutów. Mo¿na je podzieliæ na nastêpuj¹ce kategorie:
+
+#### Atrybuty opisuj¹ce czujniki oraz obserwacje: 
+Ka¿dy czujnik ma swój identyfikator oraz informacje na temat marki i modelu czujnika a tak¿e wieku czujnika (ageinmonths). Informacje na temat obiektów s¹ znormalizowane metod¹ min-max. Maksymalny identyfikator nie jest jedna równy  jeden, co mo¿e byæ spowodowane tym, ¿e pozosta³e czujniki trafi³y do zbioru testowego.
+Dodatkowo ka¿da oberwacja zawiera identyfikator, przestawiony w postaci liczby nieznormalizowanej.
+
+#### Atrybuty opisuj¹ce datê obserwacji
+Atrybuty okreœlaj¹ce miejsce obserwacji w czasie s¹ nastêpuj¹ce:
+rok (anno), day(dzieñ roku), ora(godzina) - atrybuty te s¹ znormalizowane. 
+Dodatkowo zosta³ umieszczony wpis na temat daty (data) w formie d³u¿szej, bardziej zrozumia³ej dla cz³owieka (jest ona informacj¹ redundant¹, z pozosta³ych atrybutów sz³oby wywnioskowaæ te same wartoœci).
+
+#### Atrybuty opisuj¹ce po³o¿enie geograficzne
+Opis przestrzeni w jakiej znajduj¹ siê czujniki zawiera informacje na temat szerokoœci (lat) i d³ugoœci (lon) geograficznej, a tak¿e informacje o po³o¿eniu s³oñca, wyra¿onego w postaci uk³ad wspó³rzêdnych horyzontalnych - gdzie informacje zawarte s¹ w postaci azymutu (azimuth) i wysokoœci (altitude). 
+
+#### Atrybuty opisuj¹ce warunki atmosferyczne
+Do skutecznej predykcji wyprodukowanego pr¹du na podstawie warunków atmosferycznych zawarto w zbiorze informacje na temat : temperatury (temperatura_ambiente), natê¿enia œwiat³a (irr_pvgis_mod oraz irradiamento), ciœnienia (pressure), wilgotnoœci powietrza (humidity), dewpoint(temperatura punktu rosy), kierunku wiatru(windbearing), zachmurzenia(cloudcover).
+
+#### Atrybuty zwi¹zane z zagadnieniami Autokorelacji Przestrzennej
+Obecnoœæ w zbiorze danych licznych kolumn o nazwie PCNM(pcnm1..pcnm15) œwiadczyæ mo¿e o tym, ¿e nad zbiorem danych dokonywano prac, na podstawie których usi³owano badaæ zale¿noœci przestrzenne miêdzy czujnikami. Wyrazem tego by³o obliczenie wartoœci PCNM (Principal coordinates of neighbour matrix) - który jest pomocny przy obliczaniu tego, czy dane mog³y ulec efektom korelacji przestrzennej. Wykorzystuj¹c zmienne pcnm podjêto próby obliczenia wartoœci zmiennych atmosferycznych, które s¹ pozbawione anomalii wynikaj¹cych z efektów autokorelacji przestrzennej. Zmienne te charakteryzuj¹ siê tym, ¿e maj¹ na koñcu podan¹ literkê 'i' (tempi,irri,pressurei,windspeedi,humidityi,dewpointi,windbearingi,cloudcoveri,irri_pvgis_mod,altitudei,azimuthi) - znaczenie tych zmiennych jest analogiczne jak w punkcie powy¿ej.
+
+
+Poni¿sze wykresy przedstawiaj¹ zmiany wszystkich atrybutów w przeci¹gu jednego miesi¹ca dla jednego czujnika.
+```{r fig.height=40, cache=TRUE}
+plots <- list()
+cols_to_plot <- names(tabAll)
+for(i in 1:51){
+  
+  grf = ggplot(data = tabAll[tabAll$idsito == 0.1,][1:(24*7),], aes_string(y = cols_to_plot[i], x = "data")) + 
+    geom_point() + 
+    ylab(cols_to_plot[i]) + xlab("")
+  plots = c(plots, list(grf))
+}    
+grid.arrange(grobs = plots, ncol= 3)
+```
+
+
+
+```{r conversionDataSet}
+tabAll$data <- as.POSIXct(tabAll$data, format = "%m/%d/%Y %H:%M")
+tabAll<- tabAll %>% mutate(tab = as.yearmon(data)) %>% group_by(anno, day, idsito) %>% filter(n() == 19)
+x2 <- tabAll %>% group_by(idsito, d = format(data,"%d"), m = format(data,"%m"), y = format(data,"%y"), tab) %>% summarise(energy = sum(kwh))
+
+```
+```{r showCorrelations, cache= TRUE}
+
+tabToCor <- tabAll %>% select(-c(data, tab))
+d_cor <- as.matrix(cor(tabToCor))
+d_cor_melt <- arrange(melt(d_cor), -abs(value))
+d_cor_filtered <- d_cor_melt %>% filter(Var2 == 'kwh') %>%  head(6)
+```
+
+##Korelacje miêdzy zmiennymi
+
+```{r draw plots, cache= TRUE} 
+ggcorrplot(d_cor, colors = c("tomato2", "white", "springgreen3"), title="Korellogram dla wszystkich atrybutów") 
+
+ggplot(d_cor_melt %>% filter(Var2 == 'kwh'), aes(x=reorder(Var1, value), y=value, label=value)) +   geom_point(stat='identity', aes(col=value), size=6)+ ggtitle("Wykres korelacji dla wszystkich zmiennych wzglêdem zmiennej celu - 'kwh'")    + coord_flip() + scale_colour_gradient2(low = "red", mid = "white", high = "green")
+```
+
+Wyniki nie odbiegaj¹ specjalnie od tego, czegobyœmy oczekiwali w codziennym ¿yciu od elektrowni s³onecznych. S¹ one 'zasilane' s³oñcem, st¹d jest zrozumia³e, ¿e natê¿enie s³oñca, wyra¿one zmiennymi irradiamento oraz irr_pvgis_mod bêdzie kluczowe dla wzrostu produkcji pr¹du. Podobnie sprawa siê ma w przypadku zmiennych odnosz¹cych siê do zachmurzenia. W tym przypadku korelacja jest ujemna, poniewa¿ przeszkadza ono w zwiêkszeniu natê¿eniu œwiat³a s³onecznego.
+
+##Wykres podsumowuj¹cy
+```{r createAnimation, cache=TRUE, warning=FALSE, message=FALSE, error=FALSE}
+p2 <- ggplot(data = x2 , aes(x = d, y = energy, color = as.factor(idsito), frame = tab, cumulative = FALSE)) + geom_line(aes(group = idsito)) + ggtitle("Suma energii produkowanej dziennie, w ka¿dym miesi¹cu dzia³ania systemu")
+animation2 <- gganimate(p2 , interval = 3, "dysmonth.gif")
+```
+#![](dysmonth.gif)
+
+##Regresor
+W celu znalezienia przewidywanej wartoœci zmiennej celu, nale¿a³o zapoznaæ siê z wybranymi modelami regresji i zastosowaæ je na danych treningowych. Do tego celu skorzysta³em z dwóch metod:
+
+* Linear Regression (lm)
+* Linear Regression with Forward Selection (leapForward)
+ 
+W zwi¹zku z brakiem dostatecznej iloœci pamiêci, zmuszony by³em do wybrania jedynie najmocniej skorelowanych kolumn spoœród dostêpnych w datasecie.
+```{r caretCheck, cache=TRUE}
+library(caret)
+
+inTraining <- createDataPartition(y = tabAll$kwh, p = .8, list = FALSE)
+trainingSet <- tabAll[inTraining,c('kwh', 'irradiamento', 'humidity', 'irr_pvgis_mod', 'azimuthi', 'dist')]
+testingSet <- tabAll[-inTraining,c('kwh', 'irradiamento', 'humidity', 'irr_pvgis_mod', 'azimuthi', 'dist')]
+ctrl <- trainControl()
+
+
+
+fit <- train(kwh ~ ., 
+              data = trainingSet,
+              tuneLength = 5,
+              trControl = ctrl,
+              method = "leapForward", 
+              preProc = c("center", "scale"))
+
+
+fit2 <- train(kwh ~ ., 
+              data = trainingSet,
+              tuneLength = 5,
+              trControl = ctrl,
+              method = "lm", 
+              preProc = c("center", "scale"))
+
+tab<- list(leapForward = min(fit$results$RMSE), LM = min(fit2$results$RMSE))
+tab
+```
+##Analiza wa¿noœci atrybutów algorytmu Linear Model
+W celu znalezienia najlepszego modelu regresji nale¿a³o skorzystaæ z funkcji dostarczonej wraz z bibliotek¹ caret - czyli z varImp().
+Dziêki temu poznaliœmy najistotniejsze atrybuty, maj¹ce kluczowe znaczenie przy ustaleniu wartoœci zmiennej celu.
+S¹ one nastêpuj¹ce:
+```{r}
+varImp(fit2)
+```
+
+Podobnie jak wskazywa³y wykresy korelacji, tak samo analiza wa¿noœci argumentów podpowiada nam, ¿e najistotniejszym czynnikiem przy wytwarzaniu pr¹du w elektrowniach s³onecznych jest natê¿enie œwiat³a. 
+Jak siê okaza³o w tym przypadku podstawowy model regresji liniowej spisa³ siê lepiej ni¿ jego modyfikacja.
